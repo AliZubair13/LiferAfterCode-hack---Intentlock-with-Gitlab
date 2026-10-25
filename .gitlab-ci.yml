@@ -1,0 +1,84 @@
+stages:
+  - test
+  - drift          # stub: Drift Auditor gate lands Sunday
+  - package
+  - deploy_staging # stub until Google Cloud step
+  - verify_staging # stub: acceptance-criteria checks
+  - release
+
+# --- GitLab security scanners (secure stage) ---
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/Dependency-Scanning.gitlab-ci.yml
+  - template: Security/Container-Scanning.gitlab-ci.yml
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  # Container scanning scans the image built in the package stage.
+  CS_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+
+# Scanner jobs run in the test stage; container scanning must wait for the image.
+sast:
+  stage: test
+secret_detection:
+  stage: test
+dependency_scanning:
+  stage: test
+container_scanning:
+  stage: package
+  needs: ["build-image"]
+
+unit-tests:
+  stage: test
+  image: python:3.12-slim
+  before_script:
+    - pip install --no-cache-dir -r requirements.txt
+  script:
+    - python -m pytest -v --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+
+drift-check:
+  stage: drift
+  image: python:3.12-slim
+  script:
+    - echo "STUB - ci/drift_check.py compares the MR diff to the intent contract (Sunday)"
+
+build-image:
+  stage: package
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --build-arg APP_VERSION=$CI_COMMIT_SHORT_SHA -t "$IMAGE" .
+    - docker push "$IMAGE"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy-staging:
+  stage: deploy_staging
+  script:
+    - echo "STUB - Cloud Run staging deploy (Monday)"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+verify-staging:
+  stage: verify_staging
+  script:
+    - echo "STUB - ci/verify.py runs acceptance criteria against the staging URL"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+release:
+  stage: release
+  script:
+    - echo "STUB - evidence receipt + GitLab Release"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
