@@ -9,7 +9,6 @@ Usage:
 Exit code 0 = within contract, 1 = violation, 2 = bad contract / usage error.
 """
 import argparse
-import fnmatch
 import json
 import re
 import subprocess
@@ -17,9 +16,10 @@ import sys
 from dataclasses import dataclass, asdict
 
 from ci.contract import ContractError, parse_contract
+from ci.paths import PROTECTED_PATHS, matches_any as _matches_any, path_matches  # noqa: F401
 
-# Never editable by an agent-authored change, whatever the contract says.
-ALWAYS_FORBIDDEN = [".gitlab-ci.yml", ".gitlab/", "ci/"]
+# Kept for backwards compatibility with earlier imports.
+ALWAYS_FORBIDDEN = PROTECTED_PATHS
 
 REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)")
 TEST_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+test_", re.MULTILINE)
@@ -29,17 +29,6 @@ TEST_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+test_", re.MULTILINE)
 class Violation:
     rule: str
     detail: str
-
-
-def path_matches(path: str, pattern: str) -> bool:
-    """True if `path` falls under `pattern` (exact, glob, or dir prefix)."""
-    if pattern.endswith("/"):
-        return path.startswith(pattern)
-    return path == pattern or fnmatch.fnmatch(path, pattern)
-
-
-def _matches_any(path: str, patterns) -> bool:
-    return any(path_matches(path, p) for p in patterns)
 
 
 def check_drift(contract, changes, deps_added, tests_before, tests_after):
@@ -52,6 +41,12 @@ def check_drift(contract, changes, deps_added, tests_before, tests_after):
     Returns a list of Violation (empty means the change is within contract).
     """
     violations = []
+
+    # Autonomy is bounded by risk: high-risk changes never auto-merge.
+    if contract["risk_class"] == "high":
+        violations.append(Violation(
+            "human_approval_required",
+            "risk_class is high: this change needs a human reviewer, not auto-merge"))
 
     for status, path in changes:
         if _matches_any(path, ALWAYS_FORBIDDEN):

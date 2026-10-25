@@ -1,6 +1,6 @@
 stages:
   - test
-  - drift          # stub: Drift Auditor gate lands Sunday
+  - drift          # IntentLock gates: merge request pipelines only
   - package
   - deploy_staging # stub until Google Cloud step
   - verify_staging # stub: acceptance-criteria checks
@@ -29,6 +29,7 @@ container_scanning:
   stage: package
   needs: ["build-image"]
 
+# Unit tests run in branch pipelines AND merge request pipelines.
 unit-tests:
   stage: test
   image: python:3.12-slim
@@ -40,12 +41,30 @@ unit-tests:
     when: always
     reports:
       junit: report.xml
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
 
+# IntentLock gates: injection screen -> contract validation -> drift check.
+# Fails CLOSED: a missing token, issue or contract blocks the merge request.
+# Needs a masked, UNPROTECTED CI variable INTENTLOCK_TOKEN (project access
+# token, scope api). Agent branches are unprotected, so a protected variable
+# would not be visible to this job.
 drift-check:
   stage: drift
-  image: python:3.12-slim
+  image: python:3.12            # full image: includes git
+  variables:
+    GIT_DEPTH: "0"              # full history so the base commit is available
+  before_script:
+    - pip install --no-cache-dir -r requirements.txt
   script:
-    - echo "STUB - ci/drift_check.py compares the MR diff to the intent contract (Sunday)"
+    - python -m ci.run_gates --base "$CI_MERGE_REQUEST_DIFF_BASE_SHA"
+  artifacts:
+    when: always
+    paths:
+      - gates_report.json
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 build-image:
   stage: package
@@ -76,9 +95,29 @@ verify-staging:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
-release:
+# Posts the evidence receipt on the original issue. Skips quietly (exit 0)
+# when the token is missing or the commit does not reference an issue.
+evidence-receipt:
   stage: release
+  image: python:3.12-slim
+  before_script:
+    - pip install --no-cache-dir -r requirements.txt
   script:
-    - echo "STUB - evidence receipt + GitLab Release"
+    - python -m ci.receipt
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# GitLab Release for every pipeline on the default branch.
+# allow_failure until we have confirmed the job token may create tags here.
+create-release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  script:
+    - echo "Creating release v$CI_PIPELINE_IID"
+  release:
+    tag_name: "v$CI_PIPELINE_IID"
+    description: "Automated release from pipeline $CI_PIPELINE_ID (commit $CI_COMMIT_SHORT_SHA)"
+    ref: $CI_COMMIT_SHA
+  allow_failure: true
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

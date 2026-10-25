@@ -2,13 +2,20 @@
 
 The Intent Agent posts the contract as a fenced ```yaml block in an issue
 comment. This module turns that text into a validated dict. It is plain
-Python on purpose: no LLM is involved in deciding what the contract says.
+Python on purpose: no LLM is involved in deciding what a contract may say.
+
+Because an LLM writes the contract from untrusted issue text, validation is
+strict: a poisoned contract that tries to allow everything is rejected here.
 """
 import re
 
 import yaml
 
+from ci.paths import WILDCARD_CHARS, overlaps_protected
+
 RISK_CLASSES = ("low", "medium", "high")
+MAX_ALLOWED_PATHS = 10
+MAX_NEW_DEPENDENCIES = 3
 FENCE_RE = re.compile(r"```(?:ya?ml)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -48,6 +55,22 @@ def _str_list(contract: dict, key: str, required: bool) -> list:
     return value
 
 
+def _check_allowed_path(path: str) -> None:
+    if not path or path != path.strip():
+        raise ContractError(f"allowed path {path!r} is empty or has stray whitespace")
+    if path.startswith("/") or ".." in path.split("/"):
+        raise ContractError(f"allowed path {path!r} must be a relative path inside the repo")
+    if path.endswith("/"):
+        raise ContractError(f"allowed path {path!r} is a directory; list exact files instead")
+    segments = path.split("/")
+    if any(ch in seg for seg in segments[:-1] for ch in WILDCARD_CHARS):
+        raise ContractError(f"allowed path {path!r} has a wildcard in a directory name")
+    if segments[-1] in ("*", "**", "*.*"):
+        raise ContractError(f"allowed path {path!r} is a catch-all pattern")
+    if overlaps_protected(path):
+        raise ContractError(f"allowed path {path!r} covers a protected path (CI config or gates)")
+
+
 def validate_contract(contract: dict) -> dict:
     if "issue" not in contract:
         raise ContractError("missing required field: issue")
@@ -59,11 +82,19 @@ def validate_contract(contract: dict) -> dict:
     max_deps = contract.get("max_new_dependencies", 0)
     if not isinstance(max_deps, int) or isinstance(max_deps, bool) or max_deps < 0:
         raise ContractError("max_new_dependencies must be a non-negative integer")
+    if max_deps > MAX_NEW_DEPENDENCIES:
+        raise ContractError(f"max_new_dependencies may not exceed {MAX_NEW_DEPENDENCIES}")
+
+    allowed = _str_list(contract, "allowed_paths", required=True)
+    if len(allowed) > MAX_ALLOWED_PATHS:
+        raise ContractError(f"too many allowed_paths ({len(allowed)} > {MAX_ALLOWED_PATHS})")
+    for path in allowed:
+        _check_allowed_path(path)
 
     return {
         "issue": contract["issue"],
         "summary": str(contract.get("summary", "")),
-        "allowed_paths": _str_list(contract, "allowed_paths", required=True),
+        "allowed_paths": allowed,
         "forbidden_paths": _str_list(contract, "forbidden_paths", required=False),
         "acceptance_criteria": _str_list(contract, "acceptance_criteria", required=True),
         "max_new_dependencies": max_deps,
